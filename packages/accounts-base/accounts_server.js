@@ -1,10 +1,36 @@
 var crypto = Npm.require('crypto');
 
+// Constructor for the Accounts namespace on the server. Note that this
+// constructor is less likely to be instantiated multiple times than the
+// AccountsClient constructor, because a single server can provide only
+// one set of methods.
+AccountsServer = function AccountsServer(ddpUrl) {
+  AccountsCommon.call(this, ddpUrl);
+
+  // list of all registered handlers.
+  this._loginHandlers = [];
+
+  setupUsersCollection(this._users);
+  setupDefaultLoginHandlers(this);
+  setExpireTokensInterval(this);
+
+  this._validateNewUserHooks = [
+    defaultValidateNewUserHook
+  ];
+
+  this._deleteSavedTokensForAllUsersOnStartup();
+};
+
+var Ap = AccountsServer.prototype =
+  Object.create(AccountsCommon.prototype);
+Ap.constructor = AccountsServer;
+
 ///
 /// CURRENT USER
 ///
 
-Meteor.userId = function () {
+// @override
+Ap.userId = function () {
   // This function only works if called inside a method. In theory, it
   // could also be called from publish statements, since they also
   // have a userId associated with them. However, given that publish
@@ -20,43 +46,37 @@ Meteor.userId = function () {
   return currentInvocation.userId;
 };
 
-Meteor.user = function () {
-  var userId = Meteor.userId();
-  if (!userId)
-    return null;
-  return Meteor.users.findOne(userId);
-};
-
-
 ///
 /// LOGIN HOOKS
 ///
-
-// Exceptions inside the hook callback are passed up to us.
-var validateLoginHook = new Hook();
 
 /**
  * @summary Validate login attempts.
  * @locus Server
  * @param {Function} func Called whenever a login is attempted (either successful or unsuccessful).  A login can be aborted by returning a falsy value or throwing an exception.
  */
-Accounts.validateLoginAttempt = function (func) {
-  return validateLoginHook.register(func);
+Ap.validateLoginAttempt = function (func) {
+  // Exceptions inside the hook callback are passed up to us.
+  return getOrCreateValidateLoginHook(this).register(func);
 };
 
-
+function getOrCreateValidateLoginHook (accounts) {
+  return accounts._validateLoginHook || (
+    accounts._validateLoginHook = new Hook
+  );
+}
 
 // Give each login hook callback a fresh cloned copy of the attempt
 // object, but don't clone the connection.
 //
-var cloneAttemptWithConnection = function (connection, attempt) {
+function cloneAttemptWithConnection (connection, attempt) {
   var clonedAttempt = EJSON.clone(attempt);
   clonedAttempt.connection = connection;
   return clonedAttempt;
-};
+}
 
-var validateLogin = function (connection, attempt) {
-  validateLoginHook.each(function (callback) {
+Ap._validateLogin = function (connection, attempt) {
+  getOrCreateValidateLoginHook(this).each(function (callback) {
     var ret;
     try {
       ret = callback(cloneAttemptWithConnection(connection, attempt));
@@ -82,15 +102,15 @@ var validateLogin = function (connection, attempt) {
 };
 
 
-var successfulLogin = function (connection, attempt) {
-  onLoginHook.each(function (callback) {
+Ap._successfulLogin = function (connection, attempt) {
+  this._onLoginHook.each(function (callback) {
     callback(cloneAttemptWithConnection(connection, attempt));
     return true;
   });
 };
 
-var failedLogin = function (connection, attempt) {
-  onLoginFailureHook.each(function (callback) {
+Ap._failedLogin = function (connection, attempt) {
+  this._onLoginFailureHook.each(function (callback) {
     callback(cloneAttemptWithConnection(connection, attempt));
     return true;
   });
@@ -183,10 +203,12 @@ var tryLoginMethod = function (type, fn) {
 // indicates that the login token has already been inserted into the
 // database and doesn't need to be inserted again.  (It's used by the
 // "resume" login handler).
-var loginUser = function (methodInvocation, userId, stampedLoginToken) {
+Ap._loginUser = function (methodInvocation, userId, stampedLoginToken) {
+  var self = this;
+
   if (! stampedLoginToken) {
-    stampedLoginToken = Accounts._generateStampedLoginToken();
-    Accounts._insertLoginToken(userId, stampedLoginToken);
+    stampedLoginToken = self._generateStampedLoginToken();
+    self._insertLoginToken(userId, stampedLoginToken);
   }
 
   // This order (and the avoidance of yields) is important to make
@@ -196,10 +218,10 @@ var loginUser = function (methodInvocation, userId, stampedLoginToken) {
   // currently a public API for reading the login token on a
   // connection).
   Meteor._noYieldsAllowed(function () {
-    Accounts._setLoginToken(
+    self._setLoginToken(
       userId,
       methodInvocation.connection,
-      Accounts._hashLoginToken(stampedLoginToken.token)
+      self._hashLoginToken(stampedLoginToken.token)
     );
   });
 
@@ -208,7 +230,7 @@ var loginUser = function (methodInvocation, userId, stampedLoginToken) {
   return {
     id: userId,
     token: stampedLoginToken.token,
-    tokenExpires: Accounts._tokenExpiration(stampedLoginToken.when)
+    tokenExpires: self._tokenExpiration(stampedLoginToken.when)
   };
 };
 
@@ -220,7 +242,12 @@ var loginUser = function (methodInvocation, userId, stampedLoginToken) {
 // If the login is allowed and isn't aborted by a validate login hook
 // callback, log in the user.
 //
-var attemptLogin = function (methodInvocation, methodName, methodArgs, result) {
+Ap._attemptLogin = function (
+  methodInvocation,
+  methodName,
+  methodArgs,
+  result
+) {
   if (!result)
     throw new Error("result is required");
 
@@ -232,7 +259,7 @@ var attemptLogin = function (methodInvocation, methodName, methodArgs, result) {
 
   var user;
   if (result.userId)
-    user = Meteor.users.findOne(result.userId);
+    user = this._users.findOne(result.userId);
 
   var attempt = {
     type: result.type || "unknown",
@@ -245,21 +272,25 @@ var attemptLogin = function (methodInvocation, methodName, methodArgs, result) {
   if (user)
     attempt.user = user;
 
-  // validateLogin may mutate `attempt` by adding an error and changing allowed
+  // _validateLogin may mutate `attempt` by adding an error and changing allowed
   // to false, but that's the only change it can make (and the user's callbacks
   // only get a clone of `attempt`).
-  validateLogin(methodInvocation.connection, attempt);
+  this._validateLogin(methodInvocation.connection, attempt);
 
   if (attempt.allowed) {
     var ret = _.extend(
-      loginUser(methodInvocation, result.userId, result.stampedLoginToken),
+      this._loginUser(
+        methodInvocation,
+        result.userId,
+        result.stampedLoginToken
+      ),
       result.options || {}
     );
-    successfulLogin(methodInvocation.connection, attempt);
+    this._successfulLogin(methodInvocation.connection, attempt);
     return ret;
   }
   else {
-    failedLogin(methodInvocation.connection, attempt);
+    this._failedLogin(methodInvocation.connection, attempt);
     throw attempt.error;
   }
 };
@@ -269,8 +300,14 @@ var attemptLogin = function (methodInvocation, methodName, methodArgs, result) {
 // Ensure that thrown exceptions are caught and that login hook
 // callbacks are still called.
 //
-Accounts._loginMethod = function (methodInvocation, methodName, methodArgs, type, fn) {
-  return attemptLogin(
+Ap._loginMethod = function (
+  methodInvocation,
+  methodName,
+  methodArgs,
+  type,
+  fn
+) {
+  return this._attemptLogin(
     methodInvocation,
     methodName,
     methodArgs,
@@ -286,7 +323,12 @@ Accounts._loginMethod = function (methodInvocation, methodName, methodArgs, type
 // is no corresponding method for a successful login; methods that can
 // succeed at logging a user in should always be actual login methods
 // (using either Accounts._loginMethod or Accounts.registerLoginHandler).
-Accounts._reportLoginFailure = function (methodInvocation, methodName, methodArgs, result) {
+Ap._reportLoginFailure = function (
+  methodInvocation,
+  methodName,
+  methodArgs,
+  result
+) {
   var attempt = {
     type: result.type || "unknown",
     allowed: false,
@@ -294,12 +336,15 @@ Accounts._reportLoginFailure = function (methodInvocation, methodName, methodArg
     methodName: methodName,
     methodArguments: _.toArray(methodArgs)
   };
-  if (result.userId)
-    attempt.user = Meteor.users.findOne(result.userId);
 
-  validateLogin(methodInvocation.connection, attempt);
-  failedLogin(methodInvocation.connection, attempt);
-  // validateLogin may mutate attempt to set a new error message. Return
+  if (result.userId) {
+    attempt.user = this._users.findOne(result.userId);
+  }
+
+  this._validateLogin(methodInvocation.connection, attempt);
+  this._failedLogin(methodInvocation.connection, attempt);
+
+  // _validateLogin may mutate attempt to set a new error message. Return
   // the modified version.
   return attempt;
 };
@@ -308,9 +353,6 @@ Accounts._reportLoginFailure = function (methodInvocation, methodName, methodArg
 ///
 /// LOGIN HANDLERS
 ///
-
-// list of all registered handlers.
-var loginHandlers = [];
 
 // The main entry point for auth packages to hook in to login.
 //
@@ -325,12 +367,16 @@ var loginHandlers = [];
 // - `undefined`, meaning don't handle;
 // - a login method result object
 
-Accounts.registerLoginHandler = function(name, handler) {
+Ap.registerLoginHandler = function (name, handler) {
   if (! handler) {
     handler = name;
     name = null;
   }
-  loginHandlers.push({name: name, handler: handler});
+
+  this._loginHandlers.push({
+    name: name,
+    handler: handler
+  });
 };
 
 
@@ -348,9 +394,9 @@ Accounts.registerLoginHandler = function(name, handler) {
 // Try all of the registered login handlers until one of them doesn't
 // return `undefined`, meaning it handled this call to `login`. Return
 // that return value.
-var runLoginHandlers = function (methodInvocation, options) {
-  for (var i = 0; i < loginHandlers.length; ++i) {
-    var handler = loginHandlers[i];
+Ap._runLoginHandlers = function (methodInvocation, options) {
+  for (var i = 0; i < this._loginHandlers.length; ++i) {
+    var handler = this._loginHandlers[i];
 
     var result = tryLoginMethod(
       handler.name,
@@ -359,10 +405,13 @@ var runLoginHandlers = function (methodInvocation, options) {
       }
     );
 
-    if (result)
+    if (result) {
       return result;
-    else if (result !== undefined)
+    }
+
+    if (result !== undefined) {
       throw new Meteor.Error(400, "A login handler should return a result or undefined");
+    }
   }
 
   return {
@@ -379,8 +428,8 @@ var runLoginHandlers = function (methodInvocation, options) {
 // Any connections associated with old-style unhashed tokens will be
 // in the process of becoming associated with hashed tokens and then
 // they'll get closed.
-Accounts.destroyToken = function (userId, loginToken) {
-  Meteor.users.update(userId, {
+Ap.destroyToken = function (userId, loginToken) {
+  this._users.update(userId, {
     $pull: {
       "services.resume.loginTokens": {
         $or: [
@@ -399,19 +448,19 @@ Meteor.methods({
   //   If successful, returns {token: reconnectToken, id: userId}
   //   If unsuccessful (for example, if the user closed the oauth login popup),
   //     throws an error describing the reason
-  login: function(options) {
+  login: function (options) {
     var self = this;
 
     // Login handlers should really also check whatever field they look at in
     // options, but we don't enforce it.
     check(options, Object);
 
-    var result = runLoginHandlers(self, options);
+    var result = Accounts._runLoginHandlers(self, options);
 
-    return attemptLogin(self, "login", arguments, result);
+    return Accounts._attemptLogin(self, "login", arguments, result);
   },
 
-  logout: function() {
+  logout: function () {
     var token = Accounts._getLoginToken(this.connection.id);
     Accounts._setLoginToken(this.userId, this.connection, null);
     if (token && this.userId)
@@ -462,7 +511,7 @@ Meteor.methods({
       Meteor.setTimeout(function () {
         // The observe on Meteor.users will take care of closing the connections
         // associated with `tokens`.
-        deleteSavedTokens(userId, tokens);
+        Accounts._deleteSavedTokensForUser(userId, tokens);
       }, Accounts._noConnectionCloseDelayForTest ? 0 :
                         CONNECTION_CLOSE_DELAY_MS);
       // We do not set the login token on this connection, but instead the
@@ -510,7 +559,7 @@ Meteor.methods({
     var newStampedToken = Accounts._generateStampedLoginToken();
     newStampedToken.when = currentStampedToken.when;
     Accounts._insertLoginToken(self.userId, newStampedToken);
-    return loginUser(self, self.userId, newStampedToken);
+    return Accounts._loginUser(self, self.userId, newStampedToken);
   },
 
   // Removes all tokens except the token associated with the current
@@ -539,12 +588,12 @@ var accountData = {};
 
 // HACK: This is used by 'meteor-accounts' to get the loginToken for a
 // connection. Maybe there should be a public way to do that.
-Accounts._getAccountData = function (connectionId, field) {
+Ap._getAccountData = function (connectionId, field) {
   var data = accountData[connectionId];
   return data && data[field];
 };
 
-Accounts._setAccountData = function (connectionId, field, value) {
+Ap._setAccountData = function (connectionId, field, value) {
   var data = accountData[connectionId];
 
   // safety belt. shouldn't happen. accountData is set in onConnection,
@@ -572,7 +621,7 @@ Meteor.server.onConnection(function (connection) {
 ///
 /// support reconnecting using a meteor login token
 
-Accounts._hashLoginToken = function (loginToken) {
+Ap._hashLoginToken = function (loginToken) {
   var hash = crypto.createHash('sha256');
   hash.update(loginToken);
   return hash.digest('base64');
@@ -580,44 +629,43 @@ Accounts._hashLoginToken = function (loginToken) {
 
 
 // {token, when} => {hashedToken, when}
-Accounts._hashStampedToken = function (stampedToken) {
-  return _.extend(
-    _.omit(stampedToken, 'token'),
-    {hashedToken: Accounts._hashLoginToken(stampedToken.token)}
-  );
+Ap._hashStampedToken = function (stampedToken) {
+  return _.extend(_.omit(stampedToken, 'token'), {
+    hashedToken: this._hashLoginToken(stampedToken.token)
+  });
 };
 
 
 // Using $addToSet avoids getting an index error if another client
 // logging in simultaneously has already inserted the new hashed
 // token.
-Accounts._insertHashedLoginToken = function (userId, hashedToken, query) {
+Ap._insertHashedLoginToken = function (userId, hashedToken, query) {
   query = query ? _.clone(query) : {};
   query._id = userId;
-  Meteor.users.update(
-    query,
-    { $addToSet: {
-        "services.resume.loginTokens": hashedToken
-    } }
-  );
+  this._users.update(query, {
+    $addToSet: {
+      "services.resume.loginTokens": hashedToken
+    }
+  });
 };
 
 
 // Exported for tests.
-Accounts._insertLoginToken = function (userId, stampedToken, query) {
-  Accounts._insertHashedLoginToken(
+Ap._insertLoginToken = function (userId, stampedToken, query) {
+  this._insertHashedLoginToken(
     userId,
-    Accounts._hashStampedToken(stampedToken),
+    this._hashStampedToken(stampedToken),
     query
   );
 };
 
 
-Accounts._clearAllLoginTokens = function (userId) {
-  Meteor.users.update(
-    userId,
-    {$set: {'services.resume.loginTokens': []}}
-  );
+Ap._clearAllLoginTokens = function (userId) {
+  this._users.update(userId, {
+    $set: {
+      'services.resume.loginTokens': []
+    }
+  });
 };
 
 // connection id -> observe handle for the login token that this
@@ -626,14 +674,14 @@ Accounts._clearAllLoginTokens = function (userId) {
 var userObservesForConnections = {};
 
 // test hook
-Accounts._getUserObserve = function (connectionId) {
+Ap._getUserObserve = function (connectionId) {
   return userObservesForConnections[connectionId];
 };
 
 // Clean up this connection's association with the token: that is, stop
 // the observe that we started when we associated the connection with
 // this token.
-var removeTokenFromConnection = function (connectionId) {
+function removeTokenFromConnection (connectionId) {
   if (_.has(userObservesForConnections, connectionId)) {
     var observe = userObservesForConnections[connectionId];
     if (observe === null) {
@@ -647,16 +695,18 @@ var removeTokenFromConnection = function (connectionId) {
       observe.stop();
     }
   }
-};
+}
 
-Accounts._getLoginToken = function (connectionId) {
-  return Accounts._getAccountData(connectionId, 'loginToken');
+Ap._getLoginToken = function (connectionId) {
+  return this._getAccountData(connectionId, 'loginToken');
 };
 
 // newToken is a hashed token.
-Accounts._setLoginToken = function (userId, connection, newToken) {
+Ap._setLoginToken = function (userId, connection, newToken) {
+  var self = this;
+
   removeTokenFromConnection(connection.id);
-  Accounts._setAccountData(connection.id, 'loginToken', newToken);
+  self._setAccountData(connection.id, 'loginToken', newToken);
 
   if (newToken) {
     // Set up an observe for this token. If the token goes away, we need
@@ -678,7 +728,7 @@ Accounts._setLoginToken = function (userId, connection, newToken) {
       // Because we upgrade unhashed login tokens to hashed tokens at
       // login time, sessions will only be logged in with a hashed
       // token. Thus we only need to observe hashed tokens here.
-      var observe = Meteor.users.find({
+      var observe = self._users.find({
         _id: userId,
         'services.resume.loginTokens.hashedToken': newToken
       }, { fields: { _id: 1 } }).observeChanges({
@@ -700,7 +750,7 @@ Accounts._setLoginToken = function (userId, connection, newToken) {
       // Similarly, if the connection was already closed, then the onClose
       // callback would have called removeTokenFromConnection and there won't be
       // an entry in userObservesForConnections. We can stop the observe.
-      if (Accounts._getAccountData(connection.id, 'loginToken') !== newToken ||
+      if (self._getAccountData(connection.id, 'loginToken') !== newToken ||
           !_.has(userObservesForConnections, connection.id)) {
         observe.stop();
         return;
@@ -725,19 +775,23 @@ Accounts._setLoginToken = function (userId, connection, newToken) {
   }
 };
 
+function setupDefaultLoginHandlers (accounts) {
+  accounts.registerLoginHandler("resume", defaultResumeLoginHandler);
+}
+
 // Login handler for resume tokens.
-Accounts.registerLoginHandler("resume", function(options) {
+function defaultResumeLoginHandler (options) {
   if (!options.resume)
     return undefined;
 
   check(options.resume, String);
 
-  var hashedToken = Accounts._hashLoginToken(options.resume);
+  var hashedToken = this._hashLoginToken(options.resume);
 
   // First look for just the new-style hashed login token, to avoid
   // sending the unhashed token to the database in a query if we don't
   // need to.
-  var user = Meteor.users.findOne(
+  var user = this._users.findOne(
     {"services.resume.loginTokens.hashedToken": hashedToken});
 
   if (! user) {
@@ -746,7 +800,7 @@ Accounts.registerLoginHandler("resume", function(options) {
     // the old-style token OR the new-style token, because another
     // client connection logging in simultaneously might have already
     // converted the token.
-    user = Meteor.users.findOne({
+    user = this._users.findOne({
       $or: [
         {"services.resume.loginTokens.hashedToken": hashedToken},
         {"services.resume.loginTokens.token": options.resume}
@@ -775,7 +829,7 @@ Accounts.registerLoginHandler("resume", function(options) {
     oldUnhashedStyleToken = true;
   }
 
-  var tokenExpires = Accounts._tokenExpiration(token.when);
+  var tokenExpires = this._tokenExpiration(token.when);
   if (new Date() >= tokenExpires)
     return {
       userId: user._id,
@@ -789,7 +843,7 @@ Accounts.registerLoginHandler("resume", function(options) {
     // after we read it).  Using $addToSet avoids getting an index
     // error if another client logging in simultaneously has already
     // inserted the new hashed token.
-    Meteor.users.update(
+    this._users.update(
       {
         _id: user._id,
         "services.resume.loginTokens.token": options.resume
@@ -805,7 +859,7 @@ Accounts.registerLoginHandler("resume", function(options) {
     // Remove the old token *after* adding the new, since otherwise
     // another client trying to login between our removing the old and
     // adding the new wouldn't find a token to login with.
-    Meteor.users.update(user._id, {
+    this._users.update(user._id, {
       $pull: {
         "services.resume.loginTokens": { "token": options.resume }
       }
@@ -819,19 +873,20 @@ Accounts.registerLoginHandler("resume", function(options) {
       when: token.when
     }
   };
-});
+}
 
 // (Also used by Meteor Accounts server and tests).
 //
-Accounts._generateStampedLoginToken = function () {
-  return {token: Random.secret(), when: (new Date)};
+Ap._generateStampedLoginToken = function () {
+  return {
+    token: Random.secret(),
+    when: new Date
+  };
 };
 
 ///
 /// TOKEN EXPIRATION
 ///
-
-var expireTokenInterval;
 
 // Deletes expired tokens from the database and closes all open connections
 // associated with these tokens.
@@ -840,8 +895,8 @@ var expireTokenInterval;
 // tests. oldestValidDate is simulate expiring tokens without waiting
 // for them to actually expire. userId is used by tests to only expire
 // tokens for the test user.
-var expireTokens = Accounts._expireTokens = function (oldestValidDate, userId) {
-  var tokenLifetimeMs = getTokenLifetimeMs();
+Ap._expireTokens = function (oldestValidDate, userId) {
+  var tokenLifetimeMs = this.getTokenLifetimeMs();
 
   // when calling from a test with extra arguments, you must specify both!
   if ((oldestValidDate && !userId) || (!oldestValidDate && userId)) {
@@ -855,7 +910,7 @@ var expireTokens = Accounts._expireTokens = function (oldestValidDate, userId) {
 
   // Backwards compatible with older versions of meteor that stored login token
   // timestamps as numbers.
-  Meteor.users.update(_.extend(userFilter, {
+  this._users.update(_.extend(userFilter, {
     $or: [
       { "services.resume.loginTokens.when": { $lt: oldestValidDate } },
       { "services.resume.loginTokens.when": { $lt: +oldestValidDate } }
@@ -874,29 +929,40 @@ var expireTokens = Accounts._expireTokens = function (oldestValidDate, userId) {
   // expired tokens.
 };
 
-maybeStopExpireTokensInterval = function () {
-  if (_.has(Accounts._options, "loginExpirationInDays") &&
-      Accounts._options.loginExpirationInDays === null &&
-      expireTokenInterval) {
-    Meteor.clearInterval(expireTokenInterval);
-    expireTokenInterval = null;
+// @override
+Ap.config = function (options) {
+  var superResult = AccountsCommon.prototype.config.apply(this, arguments);
+
+  // If the user set loginExpirationInDays to null, then we need to clear the
+  // timer that periodically expires tokens.
+  if (_.has(this._options, "loginExpirationInDays") &&
+      this._options.loginExpirationInDays === null &&
+      this.expireTokenInterval) {
+    Meteor.clearInterval(this.expireTokenInterval);
+    this.expireTokenInterval = null;
   }
+
+  return superResult;
 };
 
-expireTokenInterval = Meteor.setInterval(expireTokens,
-                                         EXPIRE_TOKENS_INTERVAL_MS);
+function setExpireTokensInterval (accounts) {
+  accounts.expireTokenInterval = Meteor.setInterval(function () {
+    accounts._expireTokens();
+  }, EXPIRE_TOKENS_INTERVAL_MS);
+}
 
 
 ///
 /// OAuth Encryption Support
 ///
 
-var OAuthEncryption = Package["oauth-encryption"] && Package["oauth-encryption"].OAuthEncryption;
+var OAuthEncryption =
+  Package["oauth-encryption"] &&
+  Package["oauth-encryption"].OAuthEncryption;
 
-
-var usingOAuthEncryption = function () {
+function usingOAuthEncryption () {
   return OAuthEncryption && OAuthEncryption.keyIsLoaded();
-};
+}
 
 
 // OAuth service data is temporarily stored in the pending credentials
@@ -906,14 +972,14 @@ var usingOAuthEncryption = function () {
 // user id included when storing the service data permanently in
 // the users collection.
 //
-var pinEncryptedFieldsToUser = function (serviceData, userId) {
+function pinEncryptedFieldsToUser (serviceData, userId) {
   _.each(_.keys(serviceData), function (key) {
     var value = serviceData[key];
     if (OAuthEncryption && OAuthEncryption.isSealed(value))
       value = OAuthEncryption.seal(OAuthEncryption.open(value), userId);
     serviceData[key] = value;
   });
-};
+}
 
 
 // Encrypt unencrypted login service secrets when oauth-encryption is
@@ -926,24 +992,26 @@ var pinEncryptedFieldsToUser = function (serviceData, userId) {
 // block.  Perhaps we need a post-startup callback?
 
 Meteor.startup(function () {
-  if (!usingOAuthEncryption())
+  if (! usingOAuthEncryption()) {
     return;
+  }
 
   var ServiceConfiguration =
     Package['service-configuration'].ServiceConfiguration;
 
-  ServiceConfiguration.configurations.find( {$and: [
-      { secret: {$exists: true} },
-      { "secret.algorithm": {$exists: false} }
-    ] } ).
-    forEach(function (config) {
-      ServiceConfiguration.configurations.update(
-        config._id,
-        { $set: {
-          secret: OAuthEncryption.seal(config.secret)
-        } }
-      );
+  ServiceConfiguration.configurations.find({
+    $and: [{
+      secret: { $exists: true }
+    }, {
+      "secret.algorithm": { $exists: false }
+    }]
+  }).forEach(function (config) {
+    ServiceConfiguration.configurations.update(config._id, {
+      $set: {
+        secret: OAuthEncryption.seal(config.secret)
+      }
     });
+  });
 });
 
 
@@ -951,30 +1019,29 @@ Meteor.startup(function () {
 /// CREATE USER HOOKS
 ///
 
-var onCreateUserHook = null;
-
 /**
  * @summary Customize new user creation.
  * @locus Server
  * @param {Function} func Called whenever a new user is created. Return the new user object, or throw an `Error` to abort the creation.
  */
-Accounts.onCreateUser = function (func) {
-  if (onCreateUserHook)
+Ap.onCreateUser = function (func) {
+  if (this.onCreateUserHook) {
     throw new Error("Can only call onCreateUser once");
-  else
-    onCreateUserHook = func;
+  } else {
+    this.onCreateUserHook = func;
+  }
 };
 
 // XXX see comment on Accounts.createUser in passwords_server about adding a
 // second "server options" argument.
-var defaultCreateUserHook = function (options, user) {
+function defaultCreateUserHook (options, user) {
   if (options.profile)
     user.profile = options.profile;
   return user;
-};
+}
 
 // Called by accounts-password
-Accounts.insertUserDoc = function (options, user) {
+Ap.insertUserDoc = function (options, user) {
   // - clone user document, to protect from modification
   // - add createdAt timestamp
   // - prepare an _id, so that you can modify other collections (eg
@@ -987,12 +1054,16 @@ Accounts.insertUserDoc = function (options, user) {
   // the user document (in which you can modify its contents), and
   // one that gets called after (in which you should change other
   // collections)
-  user = _.extend({createdAt: new Date(), _id: Random.id()}, user);
+  user = _.extend({
+    createdAt: new Date(),
+    _id: Random.id()
+  }, user);
 
-  if (user.services)
+  if (user.services) {
     _.each(user.services, function (serviceData) {
       pinEncryptedFieldsToUser(serviceData, user._id);
     });
+  }
 
   var fullUser;
   if (onCreateUserHook) {
@@ -1007,14 +1078,14 @@ Accounts.insertUserDoc = function (options, user) {
     fullUser = defaultCreateUserHook(options, user);
   }
 
-  _.each(validateNewUserHooks, function (hook) {
+  _.each(this._validateNewUserHooks, function (hook) {
     if (!hook(fullUser))
       throw new Meteor.Error(403, "User validation failed");
   });
 
   var userId;
   try {
-    userId = Meteor.users.insert(fullUser);
+    userId = this._users.insert(fullUser);
   } catch (e) {
     // XXX string parsing sucks, maybe
     // https://jira.mongodb.org/browse/SERVER-3069 will get fixed one day
@@ -1031,15 +1102,13 @@ Accounts.insertUserDoc = function (options, user) {
   return userId;
 };
 
-var validateNewUserHooks = [];
-
 /**
  * @summary Set restrictions on new user creation.
  * @locus Server
  * @param {Function} func Called whenever a new user is created. Takes the new user object, and returns true to allow the creation or false to abort.
  */
-Accounts.validateNewUser = function (func) {
-  validateNewUserHooks.push(func);
+Ap.validateNewUser = function (func) {
+  this._validateNewUserHooks.push(func);
 };
 
 // XXX Find a better place for this utility function
@@ -1051,8 +1120,8 @@ var quotemeta = function (str) {
 
 // Helper function: returns false if email does not match company domain from
 // the configuration.
-var testEmailDomain = function (email) {
-  var domain = Accounts._options.restrictCreationByEmailDomain;
+Ap._testEmailDomain = function (email) {
+  var domain = this._options.restrictCreationByEmailDomain;
   return !domain ||
     (_.isFunction(domain) && domain(email)) ||
     (_.isString(domain) &&
@@ -1060,20 +1129,21 @@ var testEmailDomain = function (email) {
 };
 
 // Validate new user's email or Google/Facebook/GitHub account's email
-Accounts.validateNewUser(function (user) {
-  var domain = Accounts._options.restrictCreationByEmailDomain;
+function defaultValidateNewUserHook (user) {
+  var self = this;
+  var domain = self._options.restrictCreationByEmailDomain;
   if (!domain)
     return true;
 
   var emailIsGood = false;
   if (!_.isEmpty(user.emails)) {
     emailIsGood = _.any(user.emails, function (email) {
-      return testEmailDomain(email.address);
+      return self._testEmailDomain(email.address);
     });
   } else if (!_.isEmpty(user.services)) {
     // Find any email of any service and check it
     emailIsGood = _.any(user.services, function (service) {
-      return service.email && testEmailDomain(service.email);
+      return service.email && self._testEmailDomain(service.email);
     });
   }
 
@@ -1084,7 +1154,7 @@ Accounts.validateNewUser(function (user) {
     throw new Meteor.Error(403, "@" + domain + " email required");
   else
     throw new Meteor.Error(403, "Email doesn't match the criteria.");
-});
+}
 
 ///
 /// MANAGING USER OBJECTS
@@ -1101,8 +1171,11 @@ Accounts.validateNewUser(function (user) {
 // @returns {Object} Object with token and id keys, like the result
 //        of the "login" method.
 //
-Accounts.updateOrCreateUserFromExternalService = function(
-  serviceName, serviceData, options) {
+Ap.updateOrCreateUserFromExternalService = function (
+  serviceName,
+  serviceData,
+  options
+) {
   options = _.clone(options || {});
 
   if (serviceName === "password" || serviceName === "resume")
@@ -1132,7 +1205,7 @@ Accounts.updateOrCreateUserFromExternalService = function(
     selector[serviceIdKey] = serviceData.id;
   }
 
-  var user = Meteor.users.findOne(selector);
+  var user = this._users.findOne(selector);
 
   if (user) {
     pinEncryptedFieldsToUser(serviceData, user._id);
@@ -1143,17 +1216,21 @@ Accounts.updateOrCreateUserFromExternalService = function(
     // XXX provide an onUpdateUser hook which would let apps update
     //     the profile too
     var setAttrs = {};
-    _.each(serviceData, function(value, key) {
+    _.each(serviceData, function (value, key) {
       setAttrs["services." + serviceName + "." + key] = value;
     });
 
     // XXX Maybe we should re-use the selector above and notice if the update
     //     touches nothing?
-    Meteor.users.update(user._id, {$set: setAttrs});
+    this._users.update(user._id, {
+      $set: setAttrs
+    });
+
     return {
       type: serviceName,
       userId: user._id
     };
+
   } else {
     // Create a new user with the service data. Pass other options through to
     // insertUserDoc.
@@ -1161,7 +1238,7 @@ Accounts.updateOrCreateUserFromExternalService = function(
     user.services[serviceName] = serviceData;
     return {
       type: serviceName,
-      userId: Accounts.insertUserDoc(options, user)
+      userId: this.insertUserDoc(options, user)
     };
   }
 };
@@ -1172,7 +1249,7 @@ Accounts.updateOrCreateUserFromExternalService = function(
 ///
 
 // Publish the current user's record to the client.
-Meteor.publish(null, function() {
+Meteor.publish(null, function () {
   if (this.userId) {
     return Meteor.users.find(
       {_id: this.userId},
@@ -1199,7 +1276,7 @@ var autopublishFields = {
 // @param opts {Object} with:
 //   - forLoggedInUser {Array} Array of fields published to the logged-in user
 //   - forOtherUsers {Array} Array of fields published to users that aren't logged in
-Accounts.addAutopublishFields = function(opts) {
+Ap.addAutopublishFields = function (opts) {
   autopublishFields.loggedInUser.push.apply(
     autopublishFields.loggedInUser, opts.forLoggedInUser);
   autopublishFields.otherUsers.push.apply(
@@ -1211,8 +1288,8 @@ if (Package.autopublish) {
   // addAutopublishFields.
   Meteor.startup(function () {
     // ['profile', 'username'] -> {profile: 1, username: 1}
-    var toFieldSelector = function(fields) {
-      return _.object(_.map(fields, function(field) {
+    var toFieldSelector = function (fields) {
+      return _.object(_.map(fields, function (field) {
         return [field, 1];
       }));
     };
@@ -1256,7 +1333,7 @@ Meteor.publish("meteor.loginServiceConfiguration", function () {
 // Allow a one-time configuration for a login service. Modifications
 // to this collection are also allowed in insecure mode.
 Meteor.methods({
-  "configureLoginService": function (options) {
+  configureLoginService: function (options) {
     check(options, Match.ObjectIncluding({service: String}));
     // Don't let random users configure a service we haven't added yet (so
     // that when we do later add it, it's set up with their configuration
@@ -1281,51 +1358,51 @@ Meteor.methods({
   }
 });
 
+function setupUsersCollection (users) {
+  ///
+  /// RESTRICTING WRITES TO USER OBJECTS
+  ///
+  users.allow({
+    // clients can modify the profile field of their own document, and
+    // nothing else.
+    update: function (userId, user, fields, modifier) {
+      // make sure it is our record
+      if (user._id !== userId)
+        return false;
 
-///
-/// RESTRICTING WRITES TO USER OBJECTS
-///
+      // user can only modify the 'profile' field. sets to multiple
+      // sub-keys (eg profile.foo and profile.bar) are merged into entry
+      // in the fields list.
+      if (fields.length !== 1 || fields[0] !== 'profile')
+        return false;
 
-Meteor.users.allow({
-  // clients can modify the profile field of their own document, and
-  // nothing else.
-  update: function (userId, user, fields, modifier) {
-    // make sure it is our record
-    if (user._id !== userId)
-      return false;
+      return true;
+    },
+    fetch: ['_id'] // we only look at _id.
+  });
 
-    // user can only modify the 'profile' field. sets to multiple
-    // sub-keys (eg profile.foo and profile.bar) are merged into entry
-    // in the fields list.
-    if (fields.length !== 1 || fields[0] !== 'profile')
-      return false;
-
-    return true;
-  },
-  fetch: ['_id'] // we only look at _id.
-});
-
-/// DEFAULT INDEXES ON USERS
-Meteor.users._ensureIndex('username', {unique: 1, sparse: 1});
-Meteor.users._ensureIndex('emails.address', {unique: 1, sparse: 1});
-Meteor.users._ensureIndex('services.resume.loginTokens.hashedToken',
-                          {unique: 1, sparse: 1});
-Meteor.users._ensureIndex('services.resume.loginTokens.token',
-                          {unique: 1, sparse: 1});
-// For taking care of logoutOtherClients calls that crashed before the tokens
-// were deleted.
-Meteor.users._ensureIndex('services.resume.haveLoginTokensToDelete',
-                          { sparse: 1 });
-// For expiring login tokens
-Meteor.users._ensureIndex("services.resume.loginTokens.when", { sparse: 1 });
+  /// DEFAULT INDEXES ON USERS
+  users._ensureIndex('username', {unique: 1, sparse: 1});
+  users._ensureIndex('emails.address', {unique: 1, sparse: 1});
+  users._ensureIndex('services.resume.loginTokens.hashedToken',
+                     {unique: 1, sparse: 1});
+  users._ensureIndex('services.resume.loginTokens.token',
+                     {unique: 1, sparse: 1});
+  // For taking care of logoutOtherClients calls that crashed before the
+  // tokens were deleted.
+  users._ensureIndex('services.resume.haveLoginTokensToDelete',
+                     { sparse: 1 });
+  // For expiring login tokens
+  users._ensureIndex("services.resume.loginTokens.when", { sparse: 1 });
+}
 
 ///
 /// CLEAN UP FOR `logoutOtherClients`
 ///
 
-var deleteSavedTokens = function (userId, tokensToDelete) {
+Ap._deleteSavedTokensForUser = function (userId, tokensToDelete) {
   if (tokensToDelete) {
-    Meteor.users.update(userId, {
+    this._users.update(userId, {
       $unset: {
         "services.resume.haveLoginTokensToDelete": 1,
         "services.resume.loginTokensToDelete": 1
@@ -1337,19 +1414,42 @@ var deleteSavedTokens = function (userId, tokensToDelete) {
   }
 };
 
-Meteor.startup(function () {
-  // If we find users who have saved tokens to delete on startup, delete them
-  // now. It's possible that the server could have crashed and come back up
-  // before new tokens are found in localStorage, but this shouldn't happen very
-  // often. We shouldn't put a delay here because that would give a lot of power
-  // to an attacker with a stolen login token and the ability to crash the
-  // server.
-  var users = Meteor.users.find({
-    "services.resume.haveLoginTokensToDelete": true
-  }, {
-    "services.resume.loginTokensToDelete": 1
+Ap._deleteSavedTokensForAllUsersOnStartup = function () {
+  var self = this;
+
+  // If we find users who have saved tokens to delete on startup, delete
+  // them now. It's possible that the server could have crashed and come
+  // back up before new tokens are found in localStorage, but this
+  // shouldn't happen very often. We shouldn't put a delay here because
+  // that would give a lot of power to an attacker with a stolen login
+  // token and the ability to crash the server.
+  Meteor.startup(function () {
+    self._users.find({
+      "services.resume.haveLoginTokensToDelete": true
+    }, {
+      "services.resume.loginTokensToDelete": 1
+    }).forEach(function (user) {
+      self._deleteSavedTokensForUser(
+        user._id,
+        user.services.resume.loginTokensToDelete
+      );
+    });
   });
-  users.forEach(function (user) {
-    deleteSavedTokens(user._id, user.services.resume.loginTokensToDelete);
-  });
-});
+};
+
+/**
+ * @namespace Accounts
+ * @summary The namespace for all server-side accounts-related methods.
+ */
+Accounts = new AccountsServer();
+
+// Users table. Don't use the normal autopublish, since we want to hide
+// some fields. Code to autopublish this is in accounts_server.js.
+// XXX Allow users to configure this collection name.
+
+/**
+ * @summary A [Mongo.Collection](#collections) containing user documents.
+ * @locus Anywhere
+ * @type {Mongo.Collection}
+ */
+Meteor.users = Accounts._users;
