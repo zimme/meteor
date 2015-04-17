@@ -9,6 +9,9 @@ AccountsClient = function AccountsClient(ddpUrl) {
 
   this._pageLoadLoginCallbacks = [];
   this._pageLoadLoginAttemptInfo = null;
+
+  // Defined in url_client.js.
+  this._initUrlMatching();
 };
 
 var Ap = AccountsClient.prototype =
