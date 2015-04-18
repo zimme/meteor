@@ -1025,10 +1025,10 @@ Meteor.startup(function () {
  * @param {Function} func Called whenever a new user is created. Return the new user object, or throw an `Error` to abort the creation.
  */
 Ap.onCreateUser = function (func) {
-  if (this.onCreateUserHook) {
+  if (this._onCreateUserHook) {
     throw new Error("Can only call onCreateUser once");
   } else {
-    this.onCreateUserHook = func;
+    this._onCreateUserHook = func;
   }
 };
 
@@ -1066,8 +1066,8 @@ Ap.insertUserDoc = function (options, user) {
   }
 
   var fullUser;
-  if (onCreateUserHook) {
-    fullUser = onCreateUserHook(options, user);
+  if (this._onCreateUserHook) {
+    fullUser = this._onCreateUserHook(options, user);
 
     // This is *not* part of the API. We need this because we can't isolate
     // the global server environment between tests, meaning we can't test
