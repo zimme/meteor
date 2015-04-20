@@ -1081,9 +1081,9 @@ Ap.insertUserDoc = function (options, user) {
   }
 
   _.each(this._validateNewUserHooks, function (hook) {
-    if (!hook(fullUser))
+    if (!hook.call(this, fullUser))
       throw new Meteor.Error(403, "User validation failed");
-  });
+  }, this);
 
   var userId;
   try {
