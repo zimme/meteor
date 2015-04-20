@@ -20,14 +20,12 @@ Ap._initUrlMatching = function () {
 // Separate out this functionality for testing
 
 Ap._attemptToMatchHash = function () {
-  attemptToMatchHash.call(this, savedHash, defaultSuccessHandler);
+  attemptToMatchHash(this, savedHash, defaultSuccessHandler);
 };
 
 // Note that both arguments are optional and are currently only passed by
 // accounts_url_tests.js.
-function attemptToMatchHash (hash, success) {
-  var self = this;
-
+function attemptToMatchHash (accounts, hash, success) {
   _.each(accountsPaths, function (urlPart) {
     var token;
 
@@ -39,18 +37,18 @@ function attemptToMatchHash (hash, success) {
 
       // XXX COMPAT WITH 0.9.3
       if (urlPart === "reset-password") {
-        self._resetPasswordToken = token;
+        accounts._resetPasswordToken = token;
       } else if (urlPart === "verify-email") {
-        self._verifyEmailToken = token;
+        accounts._verifyEmailToken = token;
       } else if (urlPart === "enroll-account") {
-        self._enrollAccountToken = token;
+        accounts._enrollAccountToken = token;
       }
     } else {
       return;
     }
 
     // Do some stuff with the token we matched
-    success.call(self, token, urlPart);
+    success.call(accounts, token, urlPart);
   });
 }
 
@@ -73,7 +71,9 @@ function defaultSuccessHandler (token, urlPart) {
 
 // Export for testing
 AccountsTest = {
-  attemptToMatchHash: attemptToMatchHash
+  attemptToMatchHash: function (hash, success) {
+    return attemptToMatchHash(Accounts, hash, success);
+  }
 };
 
 // XXX these should be moved to accounts-password eventually. Right now
