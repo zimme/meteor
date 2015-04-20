@@ -776,22 +776,24 @@ Ap._setLoginToken = function (userId, connection, newToken) {
 };
 
 function setupDefaultLoginHandlers (accounts) {
-  accounts.registerLoginHandler("resume", defaultResumeLoginHandler);
+  accounts.registerLoginHandler("resume", function (options) {
+    return defaultResumeLoginHandler.call(this, accounts, options);
+  });
 }
 
 // Login handler for resume tokens.
-function defaultResumeLoginHandler (options) {
+function defaultResumeLoginHandler (accounts, options) {
   if (!options.resume)
     return undefined;
 
   check(options.resume, String);
 
-  var hashedToken = this._hashLoginToken(options.resume);
+  var hashedToken = accounts._hashLoginToken(options.resume);
 
   // First look for just the new-style hashed login token, to avoid
   // sending the unhashed token to the database in a query if we don't
   // need to.
-  var user = this._users.findOne(
+  var user = accounts._users.findOne(
     {"services.resume.loginTokens.hashedToken": hashedToken});
 
   if (! user) {
@@ -800,7 +802,7 @@ function defaultResumeLoginHandler (options) {
     // the old-style token OR the new-style token, because another
     // client connection logging in simultaneously might have already
     // converted the token.
-    user = this._users.findOne({
+    user = accounts._users.findOne({
       $or: [
         {"services.resume.loginTokens.hashedToken": hashedToken},
         {"services.resume.loginTokens.token": options.resume}
@@ -829,7 +831,7 @@ function defaultResumeLoginHandler (options) {
     oldUnhashedStyleToken = true;
   }
 
-  var tokenExpires = this._tokenExpiration(token.when);
+  var tokenExpires = accounts._tokenExpiration(token.when);
   if (new Date() >= tokenExpires)
     return {
       userId: user._id,
@@ -843,7 +845,7 @@ function defaultResumeLoginHandler (options) {
     // after we read it).  Using $addToSet avoids getting an index
     // error if another client logging in simultaneously has already
     // inserted the new hashed token.
-    this._users.update(
+    accounts._users.update(
       {
         _id: user._id,
         "services.resume.loginTokens.token": options.resume
@@ -859,7 +861,7 @@ function defaultResumeLoginHandler (options) {
     // Remove the old token *after* adding the new, since otherwise
     // another client trying to login between our removing the old and
     // adding the new wouldn't find a token to login with.
-    this._users.update(user._id, {
+    accounts._users.update(user._id, {
       $pull: {
         "services.resume.loginTokens": { "token": options.resume }
       }
