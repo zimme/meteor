@@ -2048,6 +2048,7 @@ exports.bundle = function (options) {
   var starResult = null;
   var targets = {};
   var nodePath = [];
+  var lintingMessages = null;
 
   if (! release.usingRightReleaseForApp(projectContext))
     throw new Error("running wrong release for app?");
@@ -2108,9 +2109,16 @@ exports.bundle = function (options) {
       includeCordovaUnibuild: projectContext.platformList.usesCordova()
     });
 
-    compiler.lint(app, {
-      isopackCache: projectContext.isopackCache
+    lintingMessages = buildmessage.capture({
+      title: "linting the application"
+    }, function () {
+      compiler.lint(packageSource, {
+        isopackCache: projectContext.isopackCache,
+        isopack: app
+      });
     });
+    if (! lintingMessages.hasMessages())
+      lintingMessages = null;
 
     var clientTargets = [];
     // Client
@@ -2177,6 +2185,7 @@ exports.bundle = function (options) {
 
   return {
     errors: success ? false : messages,
+    warnings: lintingMessages,
     serverWatchSet: serverWatchSet,
     clientWatchSet: clientWatchSet,
     starManifest: starResult && starResult.starManifest,
