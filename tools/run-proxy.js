@@ -1,6 +1,6 @@
 var _ = require('underscore');
-var Future = require('fibers/future');
 var runLog = require('./run-log.js');
+var Promise = require('meteor-promise');
 
 // options: listenPort, proxyToPort, proxyToHost, onFailure
 var Proxy = function (options) {
@@ -56,7 +56,11 @@ _.extend(Proxy.prototype, {
       self._tryHandleConnections();
     });
 
-    var fut = new Future;
+    var allowStart;
+    var promise = new Promise(function (resolve) {
+      allowStart = resolve;
+    });
+
     self.server.on('error', function (err) {
       if (err.code === 'EADDRINUSE') {
         var port = self.listenPort;
@@ -79,8 +83,7 @@ _.extend(Proxy.prototype, {
         runLog.log('' + err);
       }
       self.onFailure();
-      // Allow start() to return.
-      fut.isResolved() || fut['return']();
+      allowStart();
     });
 
     // Don't crash if the app doesn't respond. instead return an error
@@ -111,10 +114,10 @@ _.extend(Proxy.prototype, {
         // necessary.
         server.close();
       }
-      fut.isResolved() || fut['return']();
+      allowStart();
     });
 
-    fut.wait();
+    promise.await();
   },
 
   // Idempotent.
