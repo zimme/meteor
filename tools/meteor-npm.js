@@ -2,7 +2,6 @@
 /// in which we call `npm install` to install npm dependencies,
 /// and a variety of related commands. Notably, we use `npm shrinkwrap`
 /// to ensure we get consistent versions of npm sub-dependencies.
-var Future = require('fibers/future');
 
 var cleanup = require('./cleanup.js');
 var files = require('./files.js');
@@ -12,6 +11,7 @@ var httpHelpers = require('./http-helpers.js');
 var buildmessage = require('./buildmessage.js');
 var utils = require('./utils.js');
 var runLog = require('./run-log.js');
+var Promise = require('meteor-promise');
 
 var meteorNpm = exports;
 
@@ -372,21 +372,21 @@ var runNpmCommand = function (args, cwd) {
   env.PATH = pathDecomposed.join(files.pathOsDelimiter);
   var opts = { cwd: cwd, env: env, maxBuffer: 10 * 1024 * 1024 };
 
-  var future = new Future;
-  var child_process = require('child_process');
-  child_process.execFile(
-    npmPath, args, opts, function (err, stdout, stderr) {
-    if (meteorNpm._printNpmCalls)
-      process.stdout.write(err ? 'failed\n' : 'done\n');
+  return new Promise(function (resolve) {
+    require('child_process').execFile(
+      npmPath, args, opts, function (err, stdout, stderr) {
+        if (meteorNpm._printNpmCalls) {
+          process.stdout.write(err ? 'failed\n' : 'done\n');
+        }
 
-    future.return({
-      success: ! err,
-      stdout: stdout,
-      stderr: stderr
-    });
-  });
-
-  return future.wait();
+        resolve({
+          success: ! err,
+          stdout: stdout,
+          stderr: stderr
+        });
+      }
+    );
+  }).await();
 }
 
 var constructPackageJson = function (packageName, newPackageNpmDir,
