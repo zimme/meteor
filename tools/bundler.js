@@ -158,7 +158,6 @@ var isopackets = require("./isopackets.js");
 var watch = require('./watch.js');
 var release = require('./release.js');
 var Fiber = require('fibers');
-var Future = require('fibers/future');
 var sourcemap = require('source-map');
 var runLog = require('./run-log.js');
 var PackageSource = require('./package-source.js');
@@ -166,6 +165,7 @@ var Profile = require('./profile.js').Profile;
 var compiler = require('./compiler.js');
 var packageVersionParser = require('./package-version-parser.js');
 var colonConverter = require('./colon-converter.js');
+var Promise = require('meteor-promise');
 
 // files to ignore when bundling. node has no globs, so use regexps
 exports.ignoreFiles = [
@@ -1286,13 +1286,16 @@ _.extend(JsImage.prototype, {
     // below. Some way to avoid this?
     var getAsset = function (assets, assetPath, encoding, callback) {
       assetPath = files.convertToStandardPath(assetPath);
-      var fut;
+      var promise;
       if (! callback) {
         if (! Fiber.current)
           throw new Error("The synchronous Assets API can " +
                           "only be called from within a Fiber.");
-        fut = new Future();
-        callback = fut.resolver();
+        promise = new Promise(function (resolve, reject) {
+          callback = function (err, res) {
+            err ? reject(err) : resolve(res);
+          };
+        });
       }
       var _callback = function (err, result) {
         if (result && ! encoding)
@@ -1308,8 +1311,8 @@ _.extend(JsImage.prototype, {
         var result = encoding ? buffer.toString(encoding) : buffer;
         _callback(null, result);
       }
-      if (fut)
-        return fut.wait();
+      if (promise)
+        return promise.await();
     };
 
     // Eval each JavaScript file, providing a 'Npm' symbol in the same
