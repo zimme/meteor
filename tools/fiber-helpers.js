@@ -1,6 +1,7 @@
 var _ = require("underscore");
 var Fiber = require("fibers");
 var Future = require("fibers/future");
+var Promise = require("meteor-promise");
 
 exports.parallelEach = function (collection, callback, context) {
   var futures = _.map(collection, function () {
@@ -161,4 +162,16 @@ exports.inBareFiber = function (func) {
       func.apply(self, args);
     }).run();
   };
+};
+
+// Returns a Promise that supports .resolve(result) and .reject(error).
+exports.makeFulfillablePromise = function () {
+  var resolve, reject;
+  var promise = new Promise(function (res, rej) {
+    resolve = res;
+    reject = rej;
+  });
+  promise.resolve = resolve;
+  promise.reject = reject;
+  return promise;
 };
