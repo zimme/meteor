@@ -42,7 +42,9 @@ Package.onTest(api => {
     'tracker'
   ]);
 
-  api.addFiles('minimongo_tests.js');
+  api.addFiles('minimongo_tests.js', 'client');
+  api.addFiles('wrap_transform_tests.js');
   api.addFiles('minimongo_tests_client.js', 'client');
-  api.addFiles('minimongo_tests_server.js', 'server');
+  api.addFiles('minimongo_server_tests.js', 'server');
+  api.addFiles('settimeout_in_observe_test.js');
 });
