@@ -7,15 +7,15 @@ Package.onUse(function(api) {
   api.use('npm-bcrypt@=0.7.8_2');
 
   api.use([
-    'accounts-base',
+    'accounts-email',
     'srp',
     'sha',
     'ejson',
     'ddp'
-  ], ['client', 'server']);
+  ]);
 
   // Export Accounts (etc) to packages using this one.
-  api.imply('accounts-base', ['client', 'server']);
+  api.imply('accounts-email');
 
   api.use('email', ['server']);
   api.use('random', ['server']);
@@ -30,10 +30,10 @@ Package.onUse(function(api) {
 
 Package.onTest(function(api) {
   api.use(['accounts-password', 'tinytest', 'test-helpers', 'tracker',
-           'accounts-base', 'random', 'email', 'underscore', 'check',
+           'accounts-email', 'random', 'email', 'underscore', 'check',
            'ddp']);
   api.addFiles('password_tests_setup.js', 'server');
-  api.addFiles('password_tests.js', ['client', 'server']);
+  api.addFiles('password_tests.js');
   api.addFiles('email_tests_setup.js', 'server');
   api.addFiles('email_tests.js', 'client');
 });

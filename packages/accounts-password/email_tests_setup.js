@@ -6,16 +6,14 @@
 var interceptedEmails = {}; // (email address) -> (array of options)
 
 // add html email templates that just contain the url
-Accounts.emailTemplates.resetPassword.html = 
-  Accounts.emailTemplates.enrollAccount.html =
-  Accounts.emailTemplates.verifyEmail.html = function (user, url) {
+Accounts.emailTemplates.resetPassword.html =
+  Accounts.emailTemplates.enrollAccount.html = function (user, url) {
     return url;
   };
 
 // override the from address
 Accounts.emailTemplates.resetPassword.from =
-  Accounts.emailTemplates.enrollAccount.from =
-    Accounts.emailTemplates.verifyEmail.from = function (user) {
+  Accounts.emailTemplates.enrollAccount.from = function (user) {
       return 'test@meteor.com';
     };
 
@@ -41,14 +39,6 @@ Meteor.methods({
   getInterceptedEmails: function (email) {
     check(email, String);
     return interceptedEmails[email];
-  },
-
-  addEmailForTestAndVerify: function (email) {
-    check(email, String);
-    Meteor.users.update(
-      {_id: this.userId},
-      {$push: {emails: {address: email, verified: false}}});
-    Accounts.sendVerificationEmail(this.userId, email);
   },
 
   createUserOnServer: function (email) {

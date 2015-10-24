@@ -1,5 +1,49 @@
 var crypto = Npm.require('crypto');
 
+// Generates a MongoDB selector that can be used to perform a fast case
+// insensitive lookup for the given fieldName and string. Since MongoDB does
+// not support case insensitive indexes, and case insensitive regex queries
+// are slow, we construct a set of prefix selectors for all permutations of
+// the first 4 characters ourselves. We first attempt to matching against
+// these, and because 'prefix expression' regex queries do use indexes (see
+// http://docs.mongodb.org/v2.6/reference/operator/query/regex/#index-use),
+// this has been found to greatly improve performance (from 1200ms to 5ms in a
+// test with 1.000.000 users).
+var selectorForFastCaseInsensitiveLookup = function (fieldName, string) {
+  // Performance seems to improve up to 4 prefix characters
+  var prefix = string.substring(0, Math.min(string.length, 4));
+  var orClause = _.map(generateCasePermutationsForString(prefix),
+    function (prefixPermutation) {
+      var selector = {};
+      selector[fieldName] =
+        new RegExp('^' + Meteor._escapeRegExp(prefixPermutation));
+      return selector;
+    });
+  var caseInsensitiveClause = {};
+  caseInsensitiveClause[fieldName] =
+    new RegExp('^' + Meteor._escapeRegExp(string) + '$', 'i')
+  return {$and: [{$or: orClause}, caseInsensitiveClause]};
+}
+
+// Generates permutations of all case variations of a given string.
+var generateCasePermutationsForString = function (string) {
+  var permutations = [''];
+  for (var i = 0; i < string.length; i++) {
+    var ch = string.charAt(i);
+    permutations = _.flatten(_.map(permutations, function (prefix) {
+      var lowerCaseChar = ch.toLowerCase();
+      var upperCaseChar = ch.toUpperCase();
+      // Don't add unneccesary permutations when ch is not a letter
+      if (lowerCaseChar === upperCaseChar) {
+        return [prefix + ch];
+      } else {
+        return [prefix + lowerCaseChar, prefix + upperCaseChar];
+      }
+    }));
+  }
+  return permutations;
+}
+
 /**
  * @summary Constructor for the `Accounts` namespace on the server.
  * @locus Server
@@ -80,6 +124,47 @@ AccountsServer = class AccountsServer extends AccountsCommon {
       throw new Error("Meteor.userId can only be invoked in method calls. Use this.userId in publish functions.");
     return currentInvocation.userId;
   }
+
+
+  ///
+  /// USER HELPERS
+  ///
+
+
+  _findUserByQuery(query) {
+    var user = null;
+
+    if (query.id) {
+      user = Meteor.users.findOne({ _id: query.id });
+    } else {
+      var fieldName;
+      var fieldValue;
+      if (query.username) {
+        fieldName = 'username';
+        fieldValue = query.username;
+      } else if (query.email) {
+        fieldName = 'emails.address';
+        fieldValue = query.email;
+      } else {
+        throw new Error("shouldn't happen (validation missed something)");
+      }
+      var selector = {};
+      selector[fieldName] = fieldValue;
+      user = Meteor.users.findOne(selector);
+      // If user is not found, try a case insensitive lookup
+      if (!user) {
+        selector = selectorForFastCaseInsensitiveLookup(fieldName, fieldValue);
+        var candidateUsers = Meteor.users.find(selector).fetch();
+        // No match if multiple candidates are found
+        if (candidateUsers.length === 1) {
+          user = candidateUsers[0];
+        }
+      }
+    }
+
+    return user;
+  };
+
 
   ///
   /// LOGIN HOOKS
